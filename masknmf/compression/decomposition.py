@@ -755,7 +755,8 @@ def blockwise_decomposition(
         temporal_denoiser: Optional[Callable] = None,
         device: str = "cpu",
         subset_mean: Optional[torch.tensor] = None,
-        subset_noise_std: Optional[torch.tensor] = None
+        subset_noise_std: Optional[torch.tensor] = None,
+        debias: bool= False,
 ) -> Tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
 
     first_spatial, first_temporal, subset_mean, subset_noise_std = blockwise_decomposition_singlepass(video_subset,
@@ -768,7 +769,8 @@ def blockwise_decomposition(
                                                                        temporal_denoiser=temporal_denoiser,
                                                                        device=device,
                                                                        subset_mean=subset_mean,
-                                                                       subset_noise_std=subset_noise_std)
+                                                                       subset_noise_std=subset_noise_std,
+                                                                       debias=debias)
 
     return first_spatial, first_temporal, subset_mean, subset_noise_std
     # Below is an experimental rank-1 deflation procedure
@@ -823,6 +825,7 @@ def blockwise_decomposition_singlepass(
         device: str = "cpu",
         subset_mean: Optional[torch.tensor] = None,
         subset_noise_std: Optional[torch.tensor] = None,
+        debias: bool = False,
 ) -> Tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
     num_frames, fov_dim1, fov_dim2 = video_subset.shape
     empty_values = torch.zeros((fov_dim1, fov_dim2, 1), device=device, dtype=dtype), torch.zeros((1, num_frames),
@@ -931,7 +934,16 @@ def blockwise_decomposition_singlepass(
             return empty_values[0], empty_values[1], subset_mean, subset_noise_std
         else:
             local_temporal_basis -= torch.mean(local_temporal_basis, dim=1, keepdims=True)
+    
+    v = local_temporal_basis
+    Q, R = torch.linalg.qr(v.T, mode="reduced")
+    local_spatial_basis_r = torch.linalg.solve(R, (Q.T @ subset_r.T)).T
+    local_spatial_basis = local_spatial_basis_r.reshape(fov_dim1, fov_dim2, -1)
 
+    if debias and temporal_denoiser is not None:
+        Q_u, R_u = torch.linalg.qr(local_spatial_basis_r, mode="reduced")
+        local_temporal_basis = torch.linalg.solve(R_u, Q_u.T @ subset_r)
+    
     return local_spatial_basis, local_temporal_basis, subset_mean, subset_noise_std
 
 def residual_std_calculation(spatial_decomposition: torch.tensor,
@@ -955,7 +967,8 @@ def blockwise_decomposition_with_rank_selection(
         temporal_denoiser: Optional[torch.nn.Module] = None,
         device: str = "cpu",
         subset_mean: Optional[torch.tensor] = None,
-        subset_noise_std: Optional[torch.tensor] = None
+        subset_noise_std: Optional[torch.tensor] = None,
+        debias: bool = False,
 ):
     local_spatial_basis, local_temporal_basis, subset_mean, subset_noise_std = blockwise_decomposition(
         video_subset,
@@ -968,7 +981,8 @@ def blockwise_decomposition_with_rank_selection(
         temporal_denoiser=temporal_denoiser,
         device=device,
         subset_mean=subset_mean,
-        subset_noise_std=subset_noise_std
+        subset_noise_std=subset_noise_std,
+        debias=debias,
     )
 
     decisions = evaluate_fitness(
@@ -1101,6 +1115,7 @@ def pmd_decomposition(
         spatial_denoiser: Optional[torch.nn.Module] = None,
         temporal_denoiser: Optional[torch.nn.Module] = None,
         device: Literal["auto", "cuda", "cpu"] = "auto",
+        debias: bool = False,
 ) -> PMDArray:
     """
     General PMD Compression method
@@ -1289,7 +1304,8 @@ def pmd_decomposition(
                 spatial_denoiser=spatial_denoiser,
                 temporal_denoiser=temporal_denoiser,
                 device=device,
-                subset_noise_std=dataset_noise_std[slice_dim1, slice_dim2] if not compute_normalizer else None
+                subset_noise_std=dataset_noise_std[slice_dim1, slice_dim2] if not compute_normalizer else None,
+                debias=debias,
             )
 
             dataset_mean[slice_dim1, slice_dim2] = subset_mean

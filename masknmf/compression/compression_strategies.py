@@ -147,7 +147,8 @@ class CompressDenoiseStrategy(CompressStrategy):
                  pixel_weighting: Optional[np.ndarray] = None,
                  device: Literal["auto", "cpu", "cuda"] = "auto",
                  noise_variance_quantile: float = 0.3,
-                 num_epochs: int = 10
+                 num_epochs: int = 10,
+                 debias: bool = False,
                  ):
 
         super().__init__(block_sizes,
@@ -163,6 +164,7 @@ class CompressDenoiseStrategy(CompressStrategy):
                          device)
         self._num_epochs = num_epochs
         self._noise_variance_quantile = noise_variance_quantile
+        self._debias = debias
 
     @property
     def num_epochs(self) -> int:
@@ -215,6 +217,113 @@ class CompressDenoiseStrategy(CompressStrategy):
                                                              compute_normalizer=self._compute_normalizer,
                                                              pixel_weighting=self._pixel_weighting,
                                                              device=self.device,
-                                                             temporal_denoiser=curr_temporal_denoiser)
+                                                             temporal_denoiser=curr_temporal_denoiser,
+                                                             debias=self._debias)
+
+        return self._results
+
+
+class CompressDebiasedStrategy(CompressStrategy):
+# Bespoke strategy for generating both denoised and debiased pmds
+# Results is a dict with "denoised" and "debiased" entries
+
+    def __init__(self,
+                 block_sizes: tuple[int, int] = (32, 32),
+                 frame_range: int | None  = None,
+                 max_components: int = 20,
+                 sim_conf: int = 5,
+                 frame_batch_size: int = 10000,
+                 max_consecutive_failures: int=1,
+                 spatial_avg_factor:int=1,
+                 temporal_avg_factor:int=1,
+                 compute_normalizer: Optional[bool] = True,
+                 pixel_weighting: Optional[np.ndarray] = None,
+                 device: Literal["auto", "cpu", "cuda"] = "auto",
+                 noise_variance_quantile: float = 0.3,
+                 num_epochs: int = 10,
+                 ):
+
+        super().__init__(block_sizes,
+                         frame_range,
+                         max_components,
+                         sim_conf,
+                         frame_batch_size,
+                         max_consecutive_failures,
+                         spatial_avg_factor,
+                         temporal_avg_factor,
+                         compute_normalizer,
+                         pixel_weighting,
+                         device)
+        self._num_epochs = num_epochs
+        self._noise_variance_quantile = noise_variance_quantile
+        self._results = {}
+
+    @property
+    def num_epochs(self) -> int:
+        return self._num_epochs
+
+    @num_epochs.setter
+    def num_epochs(self, new_num_epochs: int):
+        self._num_epochs = new_num_epochs
+
+    @property
+    def noise_variance_quantile(self) -> float:
+        return self._noise_variance_quantile
+
+    @noise_variance_quantile.setter
+    def noise_variance_quantile(self, new_noise_variance_quantile: float):
+        self._noise_variance_quantile = new_noise_variance_quantile
+
+    def compress(self, dataset: Union[masknmf.ArrayLike, np.ndarray]):
+
+        pmd_no_denoiser = pmd_decomposition(dataset,
+                                            self.block_sizes,
+                                            frame_range=self.frame_range,
+                                            max_components=self.max_components,
+                                            sim_conf=self._sim_conf,
+                                            frame_batch_size=self.frame_batch_size,
+                                            max_consecutive_failures=self._max_consecutive_failures,
+                                            spatial_avg_factor=self.spatial_avg_factor,
+                                            temporal_avg_factor=self.temporal_avg_factor,
+                                            compute_normalizer=self._compute_normalizer,
+                                            pixel_weighting=self._pixel_weighting,
+                                            device=self.device)
+
+        v = pmd_no_denoiser.v.cpu()
+        trained_model, _ = masknmf.compression.denoising.train_total_variance_denoiser(v,
+                                                                                       max_epochs=self.num_epochs,
+                                                                                       batch_size=128,
+                                                                                       learning_rate=1e-4)
+
+        curr_temporal_denoiser = masknmf.compression.PMDTemporalDenoiser(trained_model, self.noise_variance_quantile)
+
+        self._results["denoised"] = masknmf.compression.pmd_decomposition(dataset,
+                                                             self.block_sizes,
+                                                             frame_range=self.frame_range,
+                                                             max_components=self.max_components,
+                                                             sim_conf=self._sim_conf,
+                                                             frame_batch_size=self.frame_batch_size,
+                                                             max_consecutive_failures=self._max_consecutive_failures,
+                                                             spatial_avg_factor=self.spatial_avg_factor,
+                                                             temporal_avg_factor=self.temporal_avg_factor,
+                                                             compute_normalizer=self._compute_normalizer,
+                                                             pixel_weighting=self._pixel_weighting,
+                                                             device=self.device,
+                                                             temporal_denoiser=curr_temporal_denoiser,
+                                                             debias=False)
+        self._results["debiased"] = masknmf.compression.pmd_decomposition(dataset,
+                                                             self.block_sizes,
+                                                             frame_range=self.frame_range,
+                                                             max_components=self.max_components,
+                                                             sim_conf=self._sim_conf,
+                                                             frame_batch_size=self.frame_batch_size,
+                                                             max_consecutive_failures=self._max_consecutive_failures,
+                                                             spatial_avg_factor=self.spatial_avg_factor,
+                                                             temporal_avg_factor=self.temporal_avg_factor,
+                                                             compute_normalizer=self._compute_normalizer,
+                                                             pixel_weighting=self._pixel_weighting,
+                                                             device=self.device,
+                                                             temporal_denoiser=curr_temporal_denoiser,
+                                                             debias=True)
 
         return self._results
